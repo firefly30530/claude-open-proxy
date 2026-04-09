@@ -14,6 +14,7 @@ from src.conversion.response_converter import (
     convert_openai_streaming_to_claude_with_cancellation,
 )
 from src.core.model_manager import model_manager
+from src.services.search import is_web_search_request, extract_search_query, generate_search_stream
 
 router = APIRouter()
 
@@ -56,6 +57,31 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
         logger.debug(
             f"Processing Claude request: model={request.model}, stream={request.stream}"
         )
+
+        # Intercept web search sub-requests and execute search ourselves
+        system_text = ""
+        if isinstance(request.system, str):
+            system_text = request.system
+        elif isinstance(request.system, list):
+            system_text = " ".join(
+                b.text for b in request.system if hasattr(b, "text")
+            )
+
+        if is_web_search_request(request.tools, system_text):
+            query = extract_search_query(request.messages)
+            if query:
+                logger.info(f"Intercepting web search request for query: {query}")
+                return StreamingResponse(
+                    generate_search_stream(query, request.model),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Headers": "*",
+                    },
+                )
+            logger.warning("Detected web search request but failed to extract query")
 
         # Generate unique request ID for cancellation tracking
         request_id = str(uuid.uuid4())

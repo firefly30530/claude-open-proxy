@@ -31,7 +31,9 @@ class ClaudeMessage(BaseModel):
 class ClaudeTool(BaseModel):
     name: str
     description: Optional[str] = None
-    input_schema: Dict[str, Any]
+    input_schema: Optional[Dict[str, Any]] = None
+    type: Optional[str] = None
+    max_uses: Optional[int] = None
 
 class ClaudeThinkingConfig(BaseModel):
     enabled: bool = True

@@ -97,7 +97,28 @@ def convert_claude_to_openai(
     if claude_request.tools:
         openai_tools = []
         for tool in claude_request.tools:
-            if tool.name and tool.name.strip():
+            if tool.type == "web_search_20250305":
+                # Convert Anthropic's built-in web search tool to a standard function tool
+                openai_tools.append(
+                    {
+                        "type": Constants.TOOL_FUNCTION,
+                        Constants.TOOL_FUNCTION: {
+                            "name": "web_search",
+                            "description": "Search the web for up-to-date information.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query",
+                                    }
+                                },
+                                "required": ["query"],
+                            },
+                        },
+                    }
+                )
+            elif tool.name and tool.name.strip() and tool.input_schema is not None:
                 openai_tools.append(
                     {
                         "type": Constants.TOOL_FUNCTION,
