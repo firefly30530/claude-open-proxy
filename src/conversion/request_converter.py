@@ -1,12 +1,73 @@
 import json
 from typing import Dict, Any, List
-from venv import logger
 from src.core.constants import Constants
 from src.models.claude import ClaudeMessagesRequest, ClaudeMessage
 from src.core.config import config
 import logging
 
 logger = logging.getLogger(__name__)
+
+MIN_BYTEZ_THINKING_BUDGET_TOKENS = 2048
+
+
+def _supports_chat_completions_thinking(openai_model: str) -> bool:
+    return "api.bytez.com" in (config.openai_base_url or "") and (
+        openai_model or ""
+    ).startswith("anthropic/")
+
+
+def _normalize_reasoning_effort(request_thinking) -> str | None:
+    thinking_type = (
+        (request_thinking.type or "").strip().lower() if request_thinking else ""
+    )
+    if thinking_type in {"low", "medium", "high"}:
+        return thinking_type
+    if thinking_type in {"adaptive", "enabled"}:
+        return "medium"
+
+    effort = (config.bytez_responses_reasoning_effort or "").strip().lower()
+    return effort or None
+
+
+def _apply_thinking_config(
+    openai_request: Dict[str, Any],
+    claude_request: ClaudeMessagesRequest,
+    openai_model: str,
+) -> None:
+    request_thinking = claude_request.thinking
+    if (
+        request_thinking is None
+        or request_thinking.enabled is False
+        or not _supports_chat_completions_thinking(openai_model)
+    ):
+        return
+
+    thinking_type = (request_thinking.type or "enabled").strip().lower()
+    extra_body = openai_request.setdefault("extra_body", {})
+
+    # Bytez chat.completions does not support adaptive thinking on the OpenAI
+    # compatibility endpoint. Degrade to the closest supported equivalent.
+    if thinking_type == "adaptive":
+        thinking_type = "enabled"
+
+    budget_tokens = request_thinking.budget_tokens
+    if budget_tokens is None:
+        budget_tokens = config.bytez_responses_reasoning_budget_tokens
+    if budget_tokens is None:
+        budget_tokens = MIN_BYTEZ_THINKING_BUDGET_TOKENS
+    budget_tokens = max(budget_tokens, MIN_BYTEZ_THINKING_BUDGET_TOKENS)
+
+    if openai_request["max_tokens"] < MIN_BYTEZ_THINKING_BUDGET_TOKENS:
+        openai_request["max_tokens"] = MIN_BYTEZ_THINKING_BUDGET_TOKENS
+
+    extra_body["thinking"] = {
+        "type": thinking_type,
+        "budget_tokens": budget_tokens,
+    }
+
+    effort = _normalize_reasoning_effort(request_thinking)
+    if effort:
+        extra_body["reasoning_effort"] = effort
 
 
 def convert_claude_to_openai(
@@ -84,9 +145,6 @@ def convert_claude_to_openai(
         "temperature": claude_request.temperature,
         "stream": claude_request.stream,
     }
-    logger.debug(
-        f"Converted Claude request to OpenAI format: {json.dumps(openai_request, indent=2, ensure_ascii=False)}"
-    )
     # Add optional parameters
     if claude_request.stop_sequences:
         openai_request["stop"] = claude_request.stop_sequences
@@ -146,6 +204,12 @@ def convert_claude_to_openai(
             }
         else:
             openai_request["tool_choice"] = "auto"
+
+    _apply_thinking_config(openai_request, claude_request, openai_model)
+
+    logger.debug(
+        f"Converted Claude request to OpenAI format: {json.dumps(openai_request, indent=2, ensure_ascii=False)}"
+    )
 
     return openai_request
 

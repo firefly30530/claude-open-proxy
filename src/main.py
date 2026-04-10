@@ -36,7 +36,8 @@ def main():
         print("")
         print("Model mapping:")
         print(f"  Claude haiku models -> {config.small_model}")
-        print(f"  Claude sonnet/opus models -> {config.big_model}")
+        print(f"  Claude sonnet models -> {config.middle_model}")
+        print(f"  Claude opus models -> {config.big_model}")
         sys.exit(0)
 
     # Configuration summary
@@ -46,6 +47,10 @@ def main():
     print(f"   Big Model (opus): {config.big_model}")
     print(f"   Middle Model (sonnet): {config.middle_model}")
     print(f"   Small Model (haiku): {config.small_model}")
+    print("   Model Mapping:")
+    print(f"     Claude haiku -> {config.small_model}")
+    print(f"     Claude sonnet -> {config.middle_model}")
+    print(f"     Claude opus -> {config.big_model}")
     print(f"   Max Tokens Limit: {config.max_tokens_limit}")
     print(f"   Request Timeout: {config.request_timeout}s")
     print(f"   Server: {config.host}:{config.port}")
