@@ -248,6 +248,13 @@ def _estimate_input_tokens(body: Dict[str, Any]) -> int:
     return max(1, round(len(input_json) * 0.9 + instructions_len * 0.5))
 
 
+def _compact_log_text(text: str, limit: int = 600) -> str:
+    normalized = " ".join((text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "..."
+
+
 async def create_bytez_responses_message(
     request: ClaudeMessagesRequest, mapped_model: str
 ) -> Dict[str, Any]:
@@ -262,12 +269,28 @@ async def create_bytez_responses_message(
         response_json = response.json()
 
     usage = response_json.get("usage", {}) or {}
+    content_blocks = _extract_content_blocks(response_json)
+    text_parts = [block.get("text", "") for block in content_blocks if block.get("type") == "text"]
+    thinking_parts = [
+        block.get("thinking", "")
+        for block in content_blocks
+        if block.get("type") == "thinking"
+    ]
+    logger.info(
+        "Bytez Responses completed: "
+        f"model={mapped_model}, "
+        f"stop_reason={_stop_reason(response_json)}, "
+        f"input_tokens={usage.get('input_tokens', usage.get('prompt_tokens', 0))}, "
+        f"output_tokens={usage.get('output_tokens', usage.get('completion_tokens', 0))}, "
+        f"thinking_summary={json.dumps(_compact_log_text(' '.join(thinking_parts)), ensure_ascii=False)}, "
+        f"response_text={json.dumps(_compact_log_text(' '.join(text_parts)), ensure_ascii=False)}"
+    )
     return {
         "id": response_json.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
         "type": "message",
         "role": Constants.ROLE_ASSISTANT,
         "model": request.model,
-        "content": _extract_content_blocks(response_json),
+        "content": content_blocks,
         "stop_reason": _stop_reason(response_json),
         "stop_sequence": None,
         "usage": {
@@ -290,6 +313,8 @@ async def generate_bytez_responses_stream(
     thinking_block_open = False
     completed_payload = None
     thinking_fragments: List[str] = []
+    completed_thinking_fragments: List[str] = []
+    text_fragments: List[str] = []
 
     def event(event_name: str, data: Dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -432,6 +457,7 @@ async def generate_bytez_responses_stream(
                     delta = payload.get("delta", "")
                     if delta:
                         thinking_fragments.append(delta)
+                        completed_thinking_fragments.append(delta)
                         maybe = stop_text_block()
                         if maybe:
                             yield maybe
@@ -452,6 +478,7 @@ async def generate_bytez_responses_stream(
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta", "")
                     if delta:
+                        text_fragments.append(delta)
                         maybe = emit_thinking_signature()
                         if maybe:
                             yield maybe
@@ -491,6 +518,15 @@ async def generate_bytez_responses_stream(
         yield maybe
 
     usage = (completed_payload or {}).get("usage", {}) if completed_payload else {}
+    logger.info(
+        "Bytez Responses stream completed: "
+        f"model={mapped_model}, "
+        f"stop_reason={_stop_reason(completed_payload or {})}, "
+        f"input_tokens={estimated_input_tokens}, "
+        f"output_tokens={usage.get('output_tokens', usage.get('completion_tokens', 0))}, "
+        f"thinking_summary={json.dumps(_compact_log_text(''.join(completed_thinking_fragments)), ensure_ascii=False)}, "
+        f"response_text={json.dumps(_compact_log_text(''.join(text_fragments)), ensure_ascii=False)}"
+    )
     yield event(
         Constants.EVENT_MESSAGE_DELTA,
         {
