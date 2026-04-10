@@ -1,6 +1,20 @@
 import os
 import sys
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _derive_bytez_responses_base_url(openai_base_url: str) -> str | None:
+    if "api.bytez.com" not in (openai_base_url or ""):
+        return None
+    return "https://api.bytez.com/models/v2/openai/v1"
+
+
 # Configuration
 class Config:
     def __init__(self):
@@ -24,11 +38,33 @@ class Config:
         # Connection settings
         self.request_timeout = int(os.environ.get("REQUEST_TIMEOUT", "90"))
         self.max_retries = int(os.environ.get("MAX_RETRIES", "2"))
-        
+
         # Model settings - BIG and SMALL models
         self.big_model = os.environ.get("BIG_MODEL", "gpt-4o")
         self.middle_model = os.environ.get("MIDDLE_MODEL", self.big_model)
         self.small_model = os.environ.get("SMALL_MODEL", "gpt-4o-mini")
+
+        # Optional Bytez Responses backend for no-tool requests
+        self.bytez_responses_base_url = os.environ.get(
+            "BYTEZ_RESPONSES_BASE_URL",
+            _derive_bytez_responses_base_url(self.openai_base_url),
+        )
+        self.bytez_responses_timeout_s = int(
+            os.environ.get("BYTEZ_RESPONSES_TIMEOUT_S", "300")
+        )
+        self.bytez_responses_reasoning_enabled = _env_flag(
+            "BYTEZ_RESPONSES_REASONING_ENABLED", False
+        )
+        self.bytez_responses_reasoning_effort = os.environ.get(
+            "BYTEZ_RESPONSES_REASONING_EFFORT", "medium"
+        ).strip().lower()
+        self.bytez_responses_reasoning_budget_tokens = os.environ.get(
+            "BYTEZ_RESPONSES_REASONING_BUDGET_TOKENS"
+        )
+        if self.bytez_responses_reasoning_budget_tokens is not None:
+            self.bytez_responses_reasoning_budget_tokens = int(
+                self.bytez_responses_reasoning_budget_tokens
+            )
         
     def validate_api_key(self):
         """Basic API key validation"""

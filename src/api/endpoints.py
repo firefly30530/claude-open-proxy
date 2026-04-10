@@ -15,6 +15,11 @@ from src.conversion.response_converter import (
 )
 from src.core.model_manager import model_manager
 from src.services.search import is_web_search_request, extract_search_query, generate_search_stream
+from src.services.bytez_responses import (
+    create_bytez_responses_message,
+    generate_bytez_responses_stream,
+    should_use_bytez_responses_backend,
+)
 
 router = APIRouter()
 
@@ -54,8 +59,26 @@ async def validate_api_key(x_api_key: Optional[str] = Header(None), authorizatio
 @router.post("/v1/messages")
 async def create_message(request: ClaudeMessagesRequest, http_request: Request, _: None = Depends(validate_api_key)):
     try:
+        mapped_model = model_manager.map_claude_model_to_openai(request.model)
+        tool_names = [tool.name for tool in (request.tools or []) if tool.name]
+        request_thinking = request.thinking
+        responses_candidate = should_use_bytez_responses_backend(
+            request, mapped_model
+        )
+
         logger.debug(
-            f"Processing Claude request: model={request.model}, stream={request.stream}"
+            "Processing Claude request: "
+            f"model={request.model}, "
+            f"mapped_model={mapped_model}, "
+            f"stream={request.stream}, "
+            f"has_tools={bool(request.tools)}, "
+            f"tool_count={len(request.tools or [])}, "
+            f"tool_names={tool_names}, "
+            f"thinking_present={request_thinking is not None}, "
+            f"thinking_enabled={None if request_thinking is None else request_thinking.enabled}, "
+            f"thinking_type={None if request_thinking is None else request_thinking.type}, "
+            f"thinking_budget_tokens={None if request_thinking is None else request_thinking.budget_tokens}, "
+            f"responses_candidate={responses_candidate}"
         )
 
         # Intercept web search sub-requests and execute search ourselves
@@ -85,6 +108,25 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
 
         # Generate unique request ID for cancellation tracking
         request_id = str(uuid.uuid4())
+
+        if responses_candidate:
+            logger.info(
+                "Routing no-tool request through Bytez Responses backend: "
+                f"model={request.model}, mapped_model={mapped_model}, "
+                f"reasoning_enabled={config.bytez_responses_reasoning_enabled}"
+            )
+            if request.stream:
+                return StreamingResponse(
+                    generate_bytez_responses_stream(request, mapped_model),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Headers": "*",
+                    },
+                )
+            return await create_bytez_responses_message(request, mapped_model)
 
         # Convert Claude request to OpenAI format
         openai_request = convert_claude_to_openai(request, model_manager)
