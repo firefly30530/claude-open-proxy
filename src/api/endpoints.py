@@ -15,6 +15,11 @@ from src.conversion.response_converter import (
 )
 from src.core.model_manager import model_manager
 from src.services.search import is_web_search_request, extract_search_query, generate_search_stream
+from src.services.bytez_responses import (
+    create_bytez_responses_message,
+    generate_bytez_responses_stream,
+    should_use_bytez_responses_backend,
+)
 
 router = APIRouter()
 
@@ -116,6 +121,16 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
 
         # Convert Claude request to OpenAI format
         openai_request = convert_claude_to_openai(request, model_manager)
+        use_bytez_responses_backend = should_use_bytez_responses_backend(
+            request, mapped_model
+        )
+
+        if use_bytez_responses_backend:
+            logger.info(
+                "Routing no-tool request through Bytez Responses backend: "
+                f"model={request.model}, mapped_model={mapped_model}, "
+                f"reasoning_enabled={bool(request.thinking and request.thinking.enabled is not False)}"
+            )
 
         # Check if client disconnected before processing
         if await http_request.is_disconnected():
@@ -124,6 +139,17 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
         if request.stream:
             # Streaming response - wrap in error handling
             try:
+                if use_bytez_responses_backend:
+                    return StreamingResponse(
+                        generate_bytez_responses_stream(request, mapped_model),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                            "Access-Control-Allow-Origin": "*",
+                            "Access-Control-Allow-Headers": "*",
+                        },
+                    )
                 openai_stream = openai_client.create_chat_completion_stream(
                     openai_request, request_id
                 )
@@ -158,6 +184,8 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
                 return JSONResponse(status_code=e.status_code, content=error_response)
         else:
             # Non-streaming response
+            if use_bytez_responses_backend:
+                return await create_bytez_responses_message(request, mapped_model)
             openai_response = await openai_client.create_chat_completion(
                 openai_request, request_id
             )

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from typing import Any, Dict, List, Optional
@@ -235,6 +236,18 @@ def _stop_reason(response_json: Dict[str, Any]) -> str:
     return Constants.STOP_END_TURN
 
 
+def _estimate_input_tokens(body: Dict[str, Any]) -> int:
+    input_items = body.get("input", []) or []
+    input_json = json.dumps(input_items, ensure_ascii=False)
+    instructions = body.get("instructions")
+    instructions_len = len(instructions) if isinstance(instructions, str) else 0
+
+    # Bytez Responses does not provide prompt token usage until completion.
+    # Keep Anthropic-style stream usage stable by using the same up-front estimate
+    # in both message_start and message_delta.
+    return max(1, round(len(input_json) * 0.9 + instructions_len * 0.5))
+
+
 async def create_bytez_responses_message(
     request: ClaudeMessagesRequest, mapped_model: str
 ) -> Dict[str, Any]:
@@ -268,6 +281,7 @@ async def generate_bytez_responses_stream(
     request: ClaudeMessagesRequest, mapped_model: str
 ):
     body = build_bytez_responses_request(request, mapped_model)
+    estimated_input_tokens = _estimate_input_tokens(body)
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     next_block_index = 0
     text_block_index: Optional[int] = None
@@ -275,6 +289,7 @@ async def generate_bytez_responses_stream(
     text_block_open = False
     thinking_block_open = False
     completed_payload = None
+    thinking_fragments: List[str] = []
 
     def event(event_name: str, data: Dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -335,6 +350,22 @@ async def generate_bytez_responses_stream(
             {"type": Constants.EVENT_CONTENT_BLOCK_STOP, "index": thinking_block_index},
         )
 
+    def emit_thinking_signature():
+        if thinking_block_index is None or not thinking_fragments:
+            return None
+        signature = hashlib.sha256("".join(thinking_fragments).encode("utf-8")).hexdigest()
+        return event(
+            Constants.EVENT_CONTENT_BLOCK_DELTA,
+            {
+                "type": Constants.EVENT_CONTENT_BLOCK_DELTA,
+                "index": thinking_block_index,
+                "delta": {
+                    "type": "signature_delta",
+                    "signature": signature,
+                },
+            },
+        )
+
     yield event(
         Constants.EVENT_MESSAGE_START,
         {
@@ -347,7 +378,7 @@ async def generate_bytez_responses_stream(
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {"input_tokens": estimated_input_tokens, "output_tokens": 0},
             },
         },
     )
@@ -400,6 +431,7 @@ async def generate_bytez_responses_stream(
                 }:
                     delta = payload.get("delta", "")
                     if delta:
+                        thinking_fragments.append(delta)
                         maybe = stop_text_block()
                         if maybe:
                             yield maybe
@@ -420,9 +452,13 @@ async def generate_bytez_responses_stream(
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta", "")
                     if delta:
+                        maybe = emit_thinking_signature()
+                        if maybe:
+                            yield maybe
                         maybe = stop_thinking_block()
                         if maybe:
                             yield maybe
+                        thinking_fragments.clear()
                         maybe = start_text_block()
                         if maybe:
                             yield maybe
@@ -443,9 +479,13 @@ async def generate_bytez_responses_stream(
                 elif event_type == "response.failed":
                     raise HTTPException(status_code=502, detail=raw_data)
 
+    maybe = emit_thinking_signature()
+    if maybe:
+        yield maybe
     maybe = stop_thinking_block()
     if maybe:
         yield maybe
+    thinking_fragments.clear()
     maybe = stop_text_block()
     if maybe:
         yield maybe
@@ -460,7 +500,7 @@ async def generate_bytez_responses_stream(
                 "stop_sequence": None,
             },
             "usage": {
-                "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+                "input_tokens": estimated_input_tokens,
                 "output_tokens": usage.get(
                     "output_tokens", usage.get("completion_tokens", 0)
                 ),
